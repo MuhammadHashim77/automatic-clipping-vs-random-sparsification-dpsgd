@@ -1,0 +1,19 @@
+The dicom-images-test and dicom-images-train dirs inside data/ dir are added to .gitignore file as folder and file names are
+too long to be pushed to git. Make sure to add them to data dir so your folder structure looks like this
+
+├─ data/                       ← create manually
+│  ├─ dicom-images-train/      ← original SIIM folders
+│  └─ dicom-images-test/
+├─ src/                        ← reusable code
+│  ├─ __init__.py
+│  └─ utils.py
+├─ tools/                      ← helper scripts
+│  ├─ flatten_dicom_tree.py
+│  └─ make_previews.py
+└─ 
+
+The flatten_dicom_tree was used to take all DCM files from the two folders and put them in the images folder
+The command used to flatten the folders was python tools\flatten_dicom_tree.py --hardlink
+
+These are used to generate the PNG images using the make_previews python script
+The command used to generate images was python tools\make_previews.py --n 40 
