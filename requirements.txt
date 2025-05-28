@@ -1,0 +1,6 @@
+python==3.12.2
+pip==24.3.1
+pandas==2.2.1
+numpy==1.26.4
+pathlib==1.0.1
+pillow==10.3.0
