@@ -4,3 +4,7 @@ pandas==2.2.1
 numpy==1.26.4
 pathlib==1.0.1
 pillow==10.3.0
+albumentations==2.0.8
+segmentation-models-pytorch==0.5.0
+lightning==2.5.1.post0
+tensorboard==2.19.0
