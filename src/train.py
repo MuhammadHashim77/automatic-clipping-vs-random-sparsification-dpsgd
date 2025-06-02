@@ -35,9 +35,17 @@ class LitSeg(L.LightningModule):
         return Adam(self.parameters(), lr=self.hparams.lr)
 
 
-def run_baseline(batch_size=8, epochs=30):
-    train_ds = PneumoDataset("data/train-rle.csv", "data/images", "train")
-    val_ds   = PneumoDataset("data/train-rle.csv", "data/images", "val")
+def run_baseline(
+    batch_size=8, 
+    epochs=30, 
+    train_dataset=None, 
+    val_dataset=None,
+    num_workers=4
+):
+    if train_dataset is None:
+        train_dataset = PneumoDataset("data/train-rle.csv", "data/images", "train")
+    if val_dataset is None:
+        val_dataset = PneumoDataset("data/train-rle.csv", "data/images", "val")
 
     trainer = L.Trainer(
         max_epochs=epochs,
@@ -49,6 +57,6 @@ def run_baseline(batch_size=8, epochs=30):
     model = LitSeg()
     trainer.fit(
         model,
-        DataLoader(train_ds, batch_size, shuffle=True, num_workers=4),
-        DataLoader(val_ds,   batch_size, shuffle=False, num_workers=4),
+        DataLoader(train_dataset, batch_size, shuffle=True, num_workers=num_workers),
+        DataLoader(val_dataset, batch_size, shuffle=False, num_workers=num_workers),
     )
