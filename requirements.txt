@@ -8,3 +8,6 @@ albumentations==2.0.8
 segmentation-models-pytorch==0.5.0
 lightning==2.5.1.post0
 tensorboard==2.19.0
+opacus==1.5.0
+matplotlib==3.8.3
+torch==2.2.1
