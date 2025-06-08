@@ -19,8 +19,8 @@ def run_dp_smoke_test():
     run_comparison_experiment(
         batch_size=8,
         epochs=2,
-        noise_multiplier=1.0,
-        max_grad_norm=1.0,
+        noise_multiplier=0.5,
+        max_grad_norm=[1.0] * 64,
         target_epsilon=8.0,
         target_delta=1e-5,
         train_dataset=train_subset,

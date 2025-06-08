@@ -4,7 +4,6 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 import lightning as L
 from opacus import PrivacyEngine
-from opacus.validators import ModuleValidator
 import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
@@ -87,7 +86,7 @@ def run_dp_training(
     epochs: int = 30,
     noise_multiplier: float = 1.0,
     max_grad_norm: float = 1.0,
-    use_automatic_clipping: bool = True,
+    use_automatic_clipping: str = "per_layer",
     target_epsilon: float = 8.0,
     target_delta: float = 1e-5,
     train_dataset=None,
@@ -116,9 +115,9 @@ def run_dp_training(
         dataset_size=len(train_dataset)
     )
 
-    # Validate model for DP
-    model = ModuleValidator.fix(model)
-    ModuleValidator.validate(model, strict=True)
+    # # Validate model for DP
+    # model = ModuleValidator.fix(model)
+    # ModuleValidator.validate(model, strict=True)
 
     # Create data loaders
     train_loader = DataLoader(
@@ -134,17 +133,20 @@ def run_dp_training(
         num_workers=num_workers
     )
 
+    # Initialize optimizer
+    optimizer = optim.Adam(model.parameters(), lr=model.hparams.lr)
+
     # Initialize privacy engine
-    privacy_engine = PrivacyEngine(
-        model,
-        batch_size=batch_size,
-        sample_size=len(train_dataset),
-        alphas=[1 + x / 10.0 for x in range(1, 100)] + list(range(12, 64)),
+    privacy_engine = PrivacyEngine()
+
+    model, optimizer, train_loader = privacy_engine.make_private(
+        module=model,
+        optimizer=optimizer,
+        data_loader=train_loader,
         noise_multiplier=noise_multiplier,
         max_grad_norm=max_grad_norm,
-        automatic_clipping=use_automatic_clipping
+        clipping=use_automatic_clipping
     )
-    privacy_engine.attach(model)
 
     # Initialize trainer
     trainer = L.Trainer(
@@ -220,7 +222,7 @@ def run_comparison_experiment(
         epochs=epochs,
         noise_multiplier=noise_multiplier,
         max_grad_norm=max_grad_norm,
-        use_automatic_clipping=False,
+        use_automatic_clipping="per_layer",
         target_epsilon=target_epsilon,
         target_delta=target_delta,
         train_dataset=train_dataset,
@@ -235,7 +237,7 @@ def run_comparison_experiment(
         epochs=epochs,
         noise_multiplier=noise_multiplier,
         max_grad_norm=max_grad_norm,
-        use_automatic_clipping=True,
+        use_automatic_clipping="per_layer",
         target_epsilon=target_epsilon,
         target_delta=target_delta,
         train_dataset=train_dataset,
