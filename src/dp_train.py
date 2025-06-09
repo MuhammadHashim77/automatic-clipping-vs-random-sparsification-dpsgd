@@ -4,6 +4,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 import lightning as L
 from opacus import PrivacyEngine
+from opacus.validators import ModuleValidator
 import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
@@ -26,10 +27,20 @@ class DPLitSeg(L.LightningModule):
         batch_size: int = 8,
         epochs: int = 30,
         dataset_size: int = 1000,
+        num_groups: int = 32
     ):
         super().__init__()
         self.save_hyperparameters()
-        self.net = build_unet()
+        
+        # Build model with GroupNorm
+        self.net = build_unet(num_groups=num_groups)
+        
+        # Validate model for DP
+        self.net = ModuleValidator.fix(self.net)
+        errors = ModuleValidator.validate(self.net, strict=True)
+        if len(errors) > 0:
+            raise ValueError(f"Model validation failed: {errors}")
+            
         self.loss_fn = nn.BCEWithLogitsLoss()
         
         # Privacy parameters
@@ -86,13 +97,14 @@ def run_dp_training(
     epochs: int = 30,
     noise_multiplier: float = 1.0,
     max_grad_norm: float = 1.0,
-    use_automatic_clipping: str = "per_layer",
+    use_automatic_clipping: bool = True,
     target_epsilon: float = 8.0,
     target_delta: float = 1e-5,
     train_dataset=None,
     val_dataset=None,
     num_workers: int = 4,
-    output_dir: str = "outputs/dp_training"
+    output_dir: str = "outputs/dp_training",
+    num_groups: int = 32
 ):
     if train_dataset is None:
         train_dataset = PneumoDataset("data/train-rle.csv", "data/images", "train")
@@ -112,12 +124,9 @@ def run_dp_training(
         target_delta=target_delta,
         batch_size=batch_size,
         epochs=epochs,
-        dataset_size=len(train_dataset)
+        dataset_size=len(train_dataset),
+        num_groups=num_groups
     )
-
-    # # Validate model for DP
-    # model = ModuleValidator.fix(model)
-    # ModuleValidator.validate(model, strict=True)
 
     # Create data loaders
     train_loader = DataLoader(
@@ -133,20 +142,17 @@ def run_dp_training(
         num_workers=num_workers
     )
 
-    # Initialize optimizer
-    optimizer = optim.Adam(model.parameters(), lr=model.hparams.lr)
-
     # Initialize privacy engine
-    privacy_engine = PrivacyEngine()
-
-    model, optimizer, train_loader = privacy_engine.make_private(
-        module=model,
-        optimizer=optimizer,
-        data_loader=train_loader,
+    privacy_engine = PrivacyEngine(
+        model,
+        batch_size=batch_size,
+        sample_size=len(train_dataset),
+        alphas=[1 + x / 10.0 for x in range(1, 100)] + list(range(12, 64)),
         noise_multiplier=noise_multiplier,
         max_grad_norm=max_grad_norm,
-        clipping=use_automatic_clipping
+        automatic_clipping=use_automatic_clipping
     )
+    privacy_engine.attach(model)
 
     # Initialize trainer
     trainer = L.Trainer(
@@ -213,7 +219,8 @@ def run_comparison_experiment(
     target_delta: float = 1e-5,
     train_dataset=None,
     val_dataset=None,
-    num_workers: int = 4
+    num_workers: int = 4,
+    num_groups: int = 32
 ):
     """Run comparison between RS and Automatic Clipping."""
     # Run with Random Sparsification
@@ -222,13 +229,14 @@ def run_comparison_experiment(
         epochs=epochs,
         noise_multiplier=noise_multiplier,
         max_grad_norm=max_grad_norm,
-        use_automatic_clipping="per_layer",
+        use_automatic_clipping=False,
         target_epsilon=target_epsilon,
         target_delta=target_delta,
         train_dataset=train_dataset,
         val_dataset=val_dataset,
         num_workers=num_workers,
-        output_dir="outputs/rs_training"
+        output_dir="outputs/rs_training",
+        num_groups=num_groups
     )
 
     # Run with Automatic Clipping
@@ -237,13 +245,14 @@ def run_comparison_experiment(
         epochs=epochs,
         noise_multiplier=noise_multiplier,
         max_grad_norm=max_grad_norm,
-        use_automatic_clipping="per_layer",
+        use_automatic_clipping=True,
         target_epsilon=target_epsilon,
         target_delta=target_delta,
         train_dataset=train_dataset,
         val_dataset=val_dataset,
         num_workers=num_workers,
-        output_dir="outputs/automatic_clipping"
+        output_dir="outputs/automatic_clipping",
+        num_groups=num_groups
     )
 
     # Plot comparison
