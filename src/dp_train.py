@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-import lightning as L
 from opacus import PrivacyEngine
 from opacus.validators import ModuleValidator
 import matplotlib.pyplot as plt
@@ -10,87 +9,63 @@ import numpy as np
 from pathlib import Path
 import json
 from typing import Dict, List, Tuple
+from tqdm import tqdm
 
 from .models import build_unet
 from .dataset import PneumoDataset
 from .metrics import dice
 
-class DPLitSeg(L.LightningModule):
-    def __init__(
-        self,
-        lr: float = 1e-3,
-        noise_multiplier: float = 1.0,
-        max_grad_norm: float = 1.0,
-        use_automatic_clipping: bool = True,
-        target_epsilon: float = 8.0,
-        target_delta: float = 1e-5,
-        batch_size: int = 8,
-        epochs: int = 30,
-        dataset_size: int = 1000,
-        num_groups: int = 32
-    ):
-        super().__init__()
-        self.save_hyperparameters()
+def train_epoch(
+    model: nn.Module,
+    train_loader: DataLoader,
+    optimizer: optim.Optimizer,
+    loss_fn: nn.Module,
+    device: torch.device
+) -> Dict[str, float]:
+    model.train()
+    total_loss = 0
+    total_dice = 0
+    
+    for batch in tqdm(train_loader, desc="Training"):
+        img, mask = [b.to(device) for b in batch]
         
-        # Build model with GroupNorm
-        self.net = build_unet(num_groups=num_groups)
+        optimizer.zero_grad()
+        logits = model(img)
+        loss = loss_fn(logits, mask)
+        loss.backward()
+        optimizer.step()
         
-        # Validate model for DP
-        self.net = ModuleValidator.fix(self.net)
-        errors = ModuleValidator.validate(self.net, strict=True)
-        if len(errors) > 0:
-            raise ValueError(f"Model validation failed: {errors}")
+        total_loss += loss.item()
+        total_dice += dice(logits, mask).item()
+    
+    return {
+        'loss': total_loss / len(train_loader),
+        'dice': total_dice / len(train_loader)
+    }
+
+def validate(
+    model: nn.Module,
+    val_loader: DataLoader,
+    loss_fn: nn.Module,
+    device: torch.device
+) -> Dict[str, float]:
+    model.eval()
+    total_loss = 0
+    total_dice = 0
+    
+    with torch.no_grad():
+        for batch in tqdm(val_loader, desc="Validation"):
+            img, mask = [b.to(device) for b in batch]
+            logits = model(img)
+            loss = loss_fn(logits, mask)
             
-        self.loss_fn = nn.BCEWithLogitsLoss()
-        
-        # Privacy parameters
-        self.noise_multiplier = noise_multiplier
-        self.max_grad_norm = max_grad_norm
-        self.use_automatic_clipping = use_automatic_clipping
-        self.target_epsilon = target_epsilon
-        self.target_delta = target_delta
-        
-        # For privacy accounting
-        self.batch_size = batch_size
-        self.epochs = epochs
-        self.dataset_size = dataset_size
-        
-        # Metrics tracking
-        self.train_metrics = []
-        self.val_metrics = []
-        self.privacy_metrics = []
-
-    def forward(self, x):
-        return self.net(x)
-
-    def _step(self, batch, stage: str):
-        img, mask = batch
-        logits = self(img)
-        loss = self.loss_fn(logits, mask)
-        d = dice(logits, mask)
-        self.log(f"{stage}_loss", loss, prog_bar=True)
-        self.log(f"{stage}_dice", d, prog_bar=True)
-        return loss
-
-    def training_step(self, batch, _):
-        return self._step(batch, "train")
-
-    def validation_step(self, batch, _):
-        self._step(batch, "val")
-
-    def configure_optimizers(self):
-        return optim.Adam(self.parameters(), lr=self.hparams.lr)
-
-    def on_train_epoch_end(self):
-        # Record metrics at the end of each epoch
-        metrics = {
-            'train_loss': self.trainer.callback_metrics['train_loss'].item(),
-            'train_dice': self.trainer.callback_metrics['train_dice'].item(),
-            'val_loss': self.trainer.callback_metrics['val_loss'].item(),
-            'val_dice': self.trainer.callback_metrics['val_dice'].item(),
-            'epoch': self.current_epoch
-        }
-        self.train_metrics.append(metrics)
+            total_loss += loss.item()
+            total_dice += dice(logits, mask).item()
+    
+    return {
+        'loss': total_loss / len(val_loader),
+        'dice': total_dice / len(val_loader)
+    }
 
 def run_dp_training(
     batch_size: int = 8,
@@ -115,18 +90,12 @@ def run_dp_training(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
+    # Set device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     # Initialize model
-    model = DPLitSeg(
-        noise_multiplier=noise_multiplier,
-        max_grad_norm=max_grad_norm,
-        use_automatic_clipping=use_automatic_clipping,
-        target_epsilon=target_epsilon,
-        target_delta=target_delta,
-        batch_size=batch_size,
-        epochs=epochs,
-        dataset_size=len(train_dataset),
-        num_groups=num_groups
-    )
+    model = build_unet().to(device)
+    loss_fn = nn.BCEWithLogitsLoss()
 
     # Create data loaders
     train_loader = DataLoader(
@@ -142,43 +111,60 @@ def run_dp_training(
         num_workers=num_workers
     )
 
+    # Initialize optimizer
+    optimizer = torch.optim.SGD(
+        model.parameters(), lr=5e-4, weight_decay=1e-4
+    )
+
     # Initialize privacy engine
-    privacy_engine = PrivacyEngine(
-        model,
-        batch_size=batch_size,
-        sample_size=len(train_dataset),
-        alphas=[1 + x / 10.0 for x in range(1, 100)] + list(range(12, 64)),
+    privacy_engine = PrivacyEngine()
+    model, optimizer, train_loader = privacy_engine.make_private(
+        module=model,
+        optimizer=optimizer,
+        data_loader=train_loader,
         noise_multiplier=noise_multiplier,
         max_grad_norm=max_grad_norm,
-        automatic_clipping=use_automatic_clipping
-    )
-    privacy_engine.attach(model)
-
-    # Initialize trainer
-    trainer = L.Trainer(
-        max_epochs=epochs,
-        accelerator="auto",
-        devices="auto",
-        default_root_dir=str(output_path),
-        log_every_n_steps=10,
+        clipping="per_layer"
     )
 
-    # Train model
-    trainer.fit(model, train_loader, val_loader)
+    # Training loop
+    metrics = {
+        'train_metrics': [],
+        'val_metrics': [],
+        'privacy_metrics': []
+    }
+
+    for epoch in range(epochs):
+        print(f"\nEpoch {epoch+1}/{epochs}")
+        
+        # Train
+        train_metrics = train_epoch(model, train_loader, optimizer, loss_fn, device)
+        
+        # Validate
+        val_metrics = validate(model, val_loader, loss_fn, device)
+        
+        # Record metrics
+        epoch_metrics = {
+            'epoch': epoch,
+            'train_loss': train_metrics['loss'],
+            'train_dice': train_metrics['dice'],
+            'val_loss': val_metrics['loss'],
+            'val_dice': val_metrics['dice']
+        }
+        metrics['train_metrics'].append(epoch_metrics)
+        
+        # Print progress
+        print(f"Train Loss: {train_metrics['loss']:.4f}, Train Dice: {train_metrics['dice']:.4f}")
+        print(f"Val Loss: {val_metrics['loss']:.4f}, Val Dice: {val_metrics['dice']:.4f}")
 
     # Save metrics
-    metrics = {
-        'train_metrics': model.train_metrics,
-        'val_metrics': model.val_metrics,
-        'privacy_metrics': model.privacy_metrics
-    }
     with open(output_path / 'metrics.json', 'w') as f:
         json.dump(metrics, f)
 
     return model, metrics
 
 def plot_metrics(metrics: Dict, output_dir: str):
-    """Plot training metrics and privacy loss."""
+    """Plot training metrics."""
     output_path = Path(output_dir)
     
     # Plot accuracy metrics
@@ -196,19 +182,6 @@ def plot_metrics(metrics: Dict, output_dir: str):
     plt.grid(True)
     plt.savefig(output_path / 'accuracy_metrics.png')
     plt.close()
-
-    # Plot privacy loss
-    if metrics['privacy_metrics']:
-        plt.figure(figsize=(10, 6))
-        epsilons = [m['epsilon'] for m in metrics['privacy_metrics']]
-        plt.plot(epochs, epsilons, label='Privacy Loss (ε)')
-        plt.xlabel('Epoch')
-        plt.ylabel('Privacy Loss (ε)')
-        plt.title('Privacy Loss Over Training')
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(output_path / 'privacy_loss.png')
-        plt.close()
 
 def run_comparison_experiment(
     batch_size: int = 8,
@@ -278,20 +251,4 @@ def plot_comparison(rs_metrics: Dict, ac_metrics: Dict, output_dir: str):
     plt.legend()
     plt.grid(True)
     plt.savefig(output_path / 'accuracy_comparison.png')
-    plt.close()
-
-    # Plot privacy loss comparison
-    if rs_metrics['privacy_metrics'] and ac_metrics['privacy_metrics']:
-        plt.figure(figsize=(12, 6))
-        plt.plot(epochs, [m['epsilon'] for m in rs_metrics['privacy_metrics']], 
-                 label='RS Privacy Loss', linestyle='--')
-        plt.plot(epochs, [m['epsilon'] for m in ac_metrics['privacy_metrics']], 
-                 label='AC Privacy Loss', linestyle='-')
-        
-        plt.xlabel('Epoch')
-        plt.ylabel('Privacy Loss (ε)')
-        plt.title('Privacy Loss: RS vs Automatic Clipping')
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(output_path / 'privacy_comparison.png')
-        plt.close() 
+    plt.close() 
