@@ -42,7 +42,7 @@ class MedicalImagePreprocessor:
                 p=0.5
             ),
             A.RandomBrightnessContrast(0.05, 0.05, p=0.3),
-            A.GaussNoise(var_limit=(10.0, 50.0), p=0.3),
+            A.GaussNoise(std_range=(0.1, 0.3), p=1),
             A.GridDistortion(p=0.2),
             A.OpticalDistortion(p=0.2),
         ])
