@@ -1,128 +1,109 @@
-"""
-Reusable helpers for the Pneumothorax-DP project
-"""
+import os
 
-from pathlib import Path
-from typing import Tuple
-
+import matplotlib.pyplot as plt
 import numpy as np
-from PIL import Image
+import torch
+import torch.nn.functional as F
 
-# ---------- DICOM ► uint8 -------------------------------------------------- #
-import pydicom
-from pydicom.pixel_data_handlers.util import apply_modality_lut, apply_voi_lut
-
-
-def dcm_to_uint8(path: str | Path, *, voi_lut: bool = True) -> np.ndarray:
-    """
-    Read a DICOM file and return an 8-bit numpy array in the range [0, 255].
-
-    Parameters
-    ----------
-    path : str | Path
-        File path to the .dcm file.
-    voi_lut : bool, default True
-        If True, apply the VOI LUT or Window Center/Width contained
-        in the DICOM tags (recommended for chest X-ray display).
-
-    Handles • rescale slope/intercept
-            • VOI LUT / window level
-            • MONOCHROME1 inversion
-    """
-    ds = pydicom.dcmread(str(path))
-
-    # 1) Raw pixel data → float32
-    img = ds.pixel_array.astype(np.float32)
-
-    # 2) Modality LUT (rescale slope & intercept)
-    img = apply_modality_lut(img, ds)
-
-    # 3) VOI LUT (windowing)
-    if voi_lut:
-        img = apply_voi_lut(img, ds)
-
-    # 4) Normalise to 0-255
-    img -= img.min()
-    img /= max(img.max(), 1e-3)
-    img *= 255.0
-
-    # 5) Invert MONOCHROME1
-    if ds.PhotometricInterpretation == "MONOCHROME1":
-        img = 255.0 - img
-
-    return img.astype(np.uint8)  # shape (H, W)
-
-# ---------- RLE ► mask ----------------------------------------------------- #
+SEG_LABELS_LIST = [
+    {"id": -1, "name": "void", "rgb_values": [0, 0, 0]},
+    {"id": 0, "name": "Region above the retina (RaR)", "rgb_values": [128, 0, 0]},
+    {"id": 1, "name": "ILM: Inner limiting membrane", "rgb_values": [0, 128, 0]},
+    {
+        "id": 2,
+        "name": "NFL-IPL: Nerve fiber ending to Inner plexiform layer",
+        "rgb_values": [128, 128, 0],
+    },
+    {"id": 3, "name": "INL: Inner Nuclear layer", "rgb_values": [0, 0, 128]},
+    {"id": 4, "name": "OPL: Outer plexiform layer", "rgb_values": [128, 0, 128]},
+    {
+        "id": 5,
+        "name": "ONL-ISM: Outer Nuclear layer to Inner segment myeloid",
+        "rgb_values": [0, 128, 128],
+    },
+    {"id": 6, "name": "ISE: Inner segment ellipsoid", "rgb_values": [128, 128, 128]},
+    {
+        "id": 7,
+        "name": "OS-RPE: Outer segment to Retinal pigment epithelium",
+        "rgb_values": [64, 0, 0],
+    },
+    {"id": 8, "name": "Region below RPE (RbR)", "rgb_values": [192, 0, 0]},
+]
 
 
-def rle_decode(rle: str, shape: Tuple[int, int]) -> np.ndarray:
-    """
-    Convert the run-length-encoded string from train-rle.csv
-    into a binary mask of shape (H, W).
-
-    Parameters
-    ----------
-    rle : str
-        The run-length string, e.g. "3 4 10 5 …".
-        "-1" means "no mask" (empty array of zeros).
-    shape : (H, W)
-        Height and width of the target image.
-
-    Returns
-    -------
-    mask : np.ndarray, dtype uint8, values {0,1}
-    """
-    if rle == "-1":
-        return np.zeros(shape, dtype=np.uint8)
-
-    s = list(map(int, rle.split()))
-    starts, lengths = s[0::2], s[1::2]
-
-    starts = np.asarray(starts) - 1           # CSV is 1-indexed
-    ends   = starts + lengths
-
-    mask = np.zeros(shape[0] * shape[1], dtype=np.uint8)
-    for lo, hi in zip(starts, ends):
-        mask[lo:hi] = 1
-
-    return mask.reshape(shape, order="F")     # column-major
-
-# ---------- Overlay & save ------------------------------------------------- #
+def ensure_dir(directory):
+    if not os.path.exists(directory):
+        os.makedirs(directory)
 
 
-def save_preview(
-    image: np.ndarray,
-    mask: np.ndarray,
-    out_path: str | Path,
-    *,
-    alpha: float = 0.35,
-) -> None:
-    """
-    Blend `mask` (in red) onto `image` and save as PNG.
+def label_img_to_rgb(label_img):
+    label_img = np.squeeze(label_img)
+    labels = np.unique(label_img)
+    label_infos = [l for l in SEG_LABELS_LIST if l["id"] in labels]
 
-    Parameters
-    ----------
-    image : np.ndarray, shape (H, W) or (H, W, 3), uint8
-        Grayscale or RGB source image.
-    mask : np.ndarray, shape (H, W), {0,1}
-        Binary segmentation mask to overlay.
-    out_path : str | Path
-        Where to write the PNG.
-    alpha : float, default 0.35
-        Opacity of the red overlay.
-    """
-    if image.ndim == 2:                       # gray → RGB
-        image_rgb = np.stack([image] * 3, axis=-1)
+    label_img_rgb = np.array([label_img, label_img, label_img]).transpose(1, 2, 0)
+    for l in label_infos:
+        mask = label_img == l["id"]
+        label_img_rgb[mask] = l["rgb_values"]
+
+    return label_img_rgb.astype(np.uint8)
+
+
+def plot_mult(labels, names, save=False, idx=0):
+    n_c = len(labels)
+    fig, axs = plt.subplots(nrows=1, ncols=n_c, figsize=(n_c * 4, 4))
+    for i, ax in enumerate(axs.flatten()):
+        ax.axis("off")
+        plt.sca(ax)
+        plt.imshow(labels[i])
+
+    if save:
+        plt.savefig("./figs/" + str(idx) + ".png", bbox_inches="tight", pad_inches=0)
     else:
-        image_rgb = image.copy()
+        plt.show()
 
-    red = np.zeros_like(image_rgb)
-    red[..., 0] = 255                         # pure-red layer
 
-    blended = np.where(
-        mask[..., None].astype(bool),
-        (1 - alpha) * image_rgb + alpha * red,
-        image_rgb,
-    ).astype(np.uint8)
+def mIOU(label, pred, num_classes=9):
+    pred = F.softmax(pred, dim=1)
+    pred = torch.argmax(pred, dim=1).squeeze(1)
+    iou_list = list()
+    present_iou_list = list()
 
-    Image.fromarray(blended).save(Path(out_path))
+    pred = pred.view(-1)
+    label = label.view(-1)
+
+
+
+    for sem_class in range(num_classes):
+        pred_inds = pred == sem_class
+        target_inds = label == sem_class
+        if target_inds.long().sum().item() == 0:
+            iou_now = float("nan")
+        else:
+            intersection_now = (pred_inds[target_inds]).long().sum().item()
+            union_now = (
+                pred_inds.long().sum().item()
+                + target_inds.long().sum().item()
+                - intersection_now
+            )
+            iou_now = float(intersection_now) / float(union_now)
+            present_iou_list.append(iou_now)
+        iou_list.append(iou_now)
+    return np.mean(present_iou_list)
+
+
+def per_class_dice(y_pred, y_true, num_class):
+    avg_dice = 0
+    y_pred = y_pred.data.squeeze()
+    y_true = y_true.data.squeeze()
+    dice_all = np.zeros(num_class)
+    for i in range(num_class):
+        GT = y_true[:, :, i].view(-1)
+        Pred = y_pred[:, :, i].view(-1)
+
+        inter = (GT * Pred).sum() + 0.0001
+        union = GT.sum() + Pred.sum() + 0.0001
+        t = 2 * inter / union
+        avg_dice = avg_dice + (t / num_class)
+        dice_all[i] = t
+    return avg_dice, dice_all

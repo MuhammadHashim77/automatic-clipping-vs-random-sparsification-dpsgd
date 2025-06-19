@@ -1,191 +1,186 @@
+import argparse
+import os
+from typing import Callable, List
+
+import matplotlib.pyplot as plt
 import numpy as np
+import scipy.io as sio
 import torch
-import albumentations as A
-from pathlib import Path
-from typing import Tuple, Optional
-import pydicom
-from pydicom.pixel_data_handlers.util import apply_modality_lut, apply_voi_lut
+from tqdm import tqdm
 
-class MedicalImagePreprocessor:
-    def __init__(
-        self,
-        target_size: Tuple[int, int] = (256, 256),
-        normalize: bool = True,
-        clip_range: Tuple[float, float] = (-1.0, 1.0),
-        voi_lut: bool = True,
-        augment: bool = True
-    ):
-        """
-        Initialize the medical image preprocessor.
-        
-        Args:
-            target_size: Target size for resizing images
-            normalize: Whether to normalize pixel values
-            clip_range: Range for clipping normalized values
-            voi_lut: Whether to apply VOI LUT for DICOM images
-            augment: Whether to apply augmentations
-        """
-        self.target_size = target_size
-        self.normalize = normalize
-        self.clip_range = clip_range
-        self.voi_lut = voi_lut
-        self.augment = augment
-        
-        # Define augmentations
-        self.train_transform = A.Compose([
-            A.Resize(target_size[0], target_size[1]),
-            A.HorizontalFlip(p=0.5),
-            A.ShiftScaleRotate(
-                shift_limit=0.05,
-                scale_limit=0.1,
-                rotate_limit=10,
-                p=0.5
-            ),
-            A.RandomBrightnessContrast(0.05, 0.05, p=0.3),
-            A.GaussNoise(std_range=(0.1, 0.3), p=1),
-            A.GridDistortion(p=0.2),
-            A.OpticalDistortion(p=0.2),
-        ])
-        
-        self.val_transform = A.Compose([
-            A.Resize(target_size[0], target_size[1]),
-        ])
+from octprocessing import get_unlabelled_bscans, get_valid_img_seg_reimpl
 
-    def preprocess_dicom(self, path: str | Path) -> np.ndarray:
-        """
-        Preprocess a DICOM image.
-        
-        Args:
-            path: Path to the DICOM file
-            
-        Returns:
-            Preprocessed image as numpy array
-        """
-        ds = pydicom.dcmread(str(path))
-        
-        # Convert to float32
-        img = ds.pixel_array.astype(np.float32)
-        
-        # Apply modality LUT
-        img = apply_modality_lut(img, ds)
-        
-        # Apply VOI LUT if requested
-        if self.voi_lut:
-            img = apply_voi_lut(img, ds)
-        
-        # Normalize to 0-1
-        img -= img.min()
-        img /= max(img.max(), 1e-3)
-        
-        # Invert if MONOCHROME1
-        if ds.PhotometricInterpretation == "MONOCHROME1":
-            img = 1.0 - img
-            
-        return img
 
-    def preprocess_mask(self, mask: np.ndarray) -> np.ndarray:
-        """
-        Preprocess a binary mask.
-        
-        Args:
-            mask: Binary mask as numpy array
-            
-        Returns:
-            Preprocessed mask
-        """
-        # Ensure binary values
-        mask = (mask > 0).astype(np.float32)
-        return mask
+def plot_prediction(image, mask, prediction, file_name):
+    fig, axs = plt.subplots(1, 3, figsize=(12, 4))
+    titles = ["Input Image", "True Segmentation", "Model Output"]
+    cmaps = ["gray", "plasma", "viridis"]
 
-    def apply_transforms(
-        self,
-        image: np.ndarray,
-        mask: Optional[np.ndarray] = None,
-        is_training: bool = True
-    ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-        """
-        Apply transformations to image and mask.
-        
-        Args:
-            image: Input image
-            mask: Optional mask
-            is_training: Whether to apply training augmentations
-            
-        Returns:
-            Transformed image and mask
-        """
-        # Add channel dimension if needed
-        if image.ndim == 2:
-            image = np.expand_dims(image, axis=-1)
-            
-        # Apply transformations
-        transform = self.train_transform if (is_training and self.augment) else self.val_transform
-        if mask is not None:
-            transformed = transform(image=image, mask=mask)
-            image, mask = transformed['image'], transformed['mask']
-        else:
-            transformed = transform(image=image)
-            image = transformed['image']
-            
-        # Normalize if requested
-        if self.normalize:
-            image = (image - 0.5) * 2  # Scale to [-1, 1]
-            image = np.clip(image, self.clip_range[0], self.clip_range[1])
-            
-        return image, mask
+    for i, (img, title, cmap) in enumerate(zip([image, mask, prediction], titles, cmaps)):
+        axs[i].imshow(img, cmap=cmap)
+        axs[i].set_title(title, fontsize=12)
+        axs[i].set_xticks([])
+        axs[i].set_yticks([])
 
-    def to_tensor(
-        self,
-        image: np.ndarray,
-        mask: Optional[np.ndarray] = None
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """
-        Convert numpy arrays to PyTorch tensors.
-        
-        Args:
-            image: Image array
-            mask: Optional mask array
-            
-        Returns:
-            Image and mask tensors
-        """
-        # Convert image to tensor
-        image_tensor = torch.from_numpy(image.transpose(2, 0, 1)).float()
-        
-        # Convert mask to tensor if provided
-        mask_tensor = None
-        if mask is not None:
-            mask_tensor = torch.from_numpy(mask).unsqueeze(0).float()
-            
-        return image_tensor, mask_tensor
+    plt.tight_layout(pad=2.0)
+    plt.savefig(file_name, dpi=200)
+    plt.close(fig)
 
-    def __call__(
-        self,
-        image: np.ndarray,
-        mask: Optional[np.ndarray] = None,
-        is_training: bool = True
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """
-        Apply complete preprocessing pipeline.
-        
-        Args:
-            image: Input image
-            mask: Optional mask
-            is_training: Whether to apply training augmentations
-            
-        Returns:
-            Preprocessed image and mask tensors
-        """
-        # Preprocess image
-        if isinstance(image, (str, Path)):
-            image = self.preprocess_dicom(image)
-            
-        # Preprocess mask if provided
-        if mask is not None:
-            mask = self.preprocess_mask(mask)
-            
-        # Apply transformations
-        image, mask = self.apply_transforms(image, mask, is_training)
-        
-        # Convert to tensors
-        return self.to_tensor(image, mask) 
+
+def pad_to_max_num(i: int, mx: int) -> str:
+    return str(i).zfill(len(str(mx)))
+
+
+def slice_to_bscans(x: np.ndarray) -> List[np.ndarray]:
+    return [x[:, :, i] for i in range(x.shape[2])]
+
+
+def slicing(x: torch.Tensor) -> List[torch.Tensor]:
+    col_width = 12
+    slices = []
+    for bscan in slice_to_bscans(x.numpy()):
+        for i in range(bscan.shape[1] // col_width):
+            slices.append(bscan[:, i * col_width : (i + 1) * col_width])
+    return [torch.tensor(s) for s in slices]
+
+
+def test_slicing(path):
+    obj = np.load(path, allow_pickle=True).item()
+    x, _ = get_valid_img_seg_reimpl(obj)
+    x = torch.Tensor(x)
+    slices = slicing(x)
+
+    col_num = x.shape[1] // 12
+    for b in range(x.shape[2]):
+        for col in range(col_num):
+            assert torch.all(x[:, col * 12:(col + 1) * 12, b] == slices[b * col_num + col]), \
+                f"Slice {col} in image {b} is off"
+    sum_scans = sum([e.shape[1] for e in slices])
+    assert x.shape[1] // 12 * 12 * x.shape[2] == sum_scans, \
+        f"Sample count mismatch: {sum_scans} vs expected {x.shape[1] // 12 * 12 * x.shape[2]}"
+
+
+class DataPreprocessor:
+    def __init__(self, data_path, dest_path, slicing: Callable, is_mat=False, labelled_dataset=True):
+        self.ft_mat = {True: ".mat", False: ".npy"}
+        self.is_mat = is_mat
+        self.labelled_dataset = labelled_dataset
+        self.dest_path = dest_path
+        self.slicing = slicing
+
+        assert data_path != dest_path, "Source and destination paths must differ"
+        self.img_files = [
+            os.path.abspath(e.path)
+            for e in os.scandir(data_path)
+            if e.is_file() and e.name.endswith(self.ft_mat[is_mat])
+        ]
+        assert self.img_files, f"No {self.ft_mat[is_mat]} files found in {data_path}"
+
+        self.img_slice_nums = {}
+        self.labels = {"images", "masks"} if labelled_dataset else {"images"}
+
+
+        for f in self.img_files:
+            obj = sio.loadmat(f) if is_mat else np.load(f, allow_pickle=True).item()
+            if labelled_dataset:
+                img, mask = map(torch.Tensor, get_valid_img_seg_reimpl(obj))
+                self.img_slice_nums[f] = len(slicing(img))
+                assert self.img_slice_nums[f] == len(slicing(mask)), f"Image/mask slice mismatch in {f}"
+            else:
+                img = torch.Tensor(get_unlabelled_bscans(obj))
+                self.img_slice_nums[f] = len(slicing(img))
+
+
+        for lbl in self.labels:
+            for split in ["train", "val", "test"]:
+                os.makedirs(os.path.join(dest_path, split, lbl), exist_ok=True)
+
+    def preprocess(self):
+        for i, fpath in enumerate(self.img_files):
+            filename = os.path.basename(fpath)
+            subject_num = int(filename.split(".")[0].split("_")[1])
+
+            if subject_num < 7:
+                split = "train"
+            elif subject_num in [7, 8]:
+                split = "val"
+            elif subject_num in [9, 10]:
+                split = "test"
+            else:
+                raise ValueError(f"Unexpected subject number in filename: {filename}")
+
+            obj = sio.loadmat(fpath) if self.is_mat else np.load(fpath, allow_pickle=True).item()
+            if self.labelled_dataset:
+                img, mask = map(torch.Tensor, get_valid_img_seg_reimpl(obj))
+                data = {"images": img, "masks": mask}
+            else:
+                data = {"images": torch.Tensor(get_unlabelled_bscans(obj))}
+
+            slices = {k: self.slicing(v) for k, v in data.items() if k in self.labels}
+            total_slices = self.img_slice_nums[fpath]
+
+            for slice_num in tqdm(range(total_slices), desc="Saving slices"):
+                for label in self.labels:
+                    sample = slices[label][slice_num]
+                    out_dir = os.path.join(self.dest_path, split, label)
+                    base = os.path.splitext(filename)[0]
+                    fname = f"{base}_{pad_to_max_num(slice_num, total_slices)}.npy"
+                    np.save(os.path.join(out_dir, fname), sample.numpy())
+
+    def __init__(self, data_path, dest_path, slicing: Callable, is_mat=False):
+        assert data_path != dest_path, "Source and destination paths must differ"
+
+        self.dest_path = dest_path
+        self.is_mat = is_mat
+        self.slicing = slicing
+        self.labels = {"images", "masks"}
+
+        dataset = sio.loadmat(data_path)
+        self.images = dataset["AllSubjects"][0][:29]
+        self.masks = dataset["ManualFluid1"][0]
+        self.img_slice_nums = {}
+
+        for i in range(len(self.images)):
+            img, mask = map(torch.Tensor, (self.images[i], self.masks[i]))
+            self.img_slice_nums[str(i)] = len(slicing(img))
+            assert self.img_slice_nums[str(i)] == len(slicing(mask)), f"Mismatch at index {i}"
+
+        for lbl in self.labels:
+            for split in ["train", "val", "test"]:
+                os.makedirs(os.path.join(dest_path, split, lbl), exist_ok=True)
+
+    def preprocess(self):
+        for i, (img_np, mask_np) in enumerate(zip(self.images, self.masks)):
+
+            split = "train" if i < 19 else "val" if i < 24 else "test"
+            img, mask = map(torch.Tensor, (img_np, mask_np))
+            slices = {k: self.slicing(v) for k, v in {"images": img, "masks": mask}.items()}
+            total_slices = self.img_slice_nums[str(i)]
+
+            for slice_num in tqdm(range(total_slices), desc="Saving slices"):
+                for label in self.labels:
+                    sample = slices[label][slice_num]
+                    out_dir = os.path.join(self.dest_path, split, label)
+                    fname = f"{str(i)}_{pad_to_max_num(slice_num, total_slices)}.npy"
+                    np.save(os.path.join(out_dir, fname), sample.numpy())
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Preprocessing for dataset containing siim-acr-pneumothorax-segmentation")
+    parser.add_argument("data_path", type=str, help="Path to input data")
+    parser.add_argument("dest_path", type=str, help="Path to save output")
+    parser.add_argument("--dataset", choices=["Pneumothorax", None], default=None)
+    parser.add_argument("--is_mat", type=bool, default=True)
+    parser.add_argument("--full_bscan", type=bool, default=True)
+    parser.add_argument(
+        "--extract_dataset",
+        choices=["labelled_dataset", "unlabelled_dataset"],
+        default="labelled_dataset"
+    )
+    args = parser.parse_args()
+
+    labelled = args.extract_dataset == "labelled_dataset"
+    slicing_fn = slice_to_bscans if args.full_bscan else slicing
+
+    processor = DataPreprocessor(args.data_path, args.dest_path, slicing_fn, args.is_mat, labelled)
+    processor.preprocess()
