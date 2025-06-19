@@ -2,103 +2,173 @@
 
 This project implements and compares two different approaches to gradient clipping in Differentially Private Stochastic Gradient Descent (DP-SGD) for medical image segmentation: Random Sparsification (RS) and Automatic Clipping (AC). The comparison is performed on a pneumonia segmentation task using chest X-ray images.
 
-## Project Importance
+## Overview
 
-Differential Privacy (DP) is crucial in medical imaging for several reasons:
-1. **Patient Privacy Protection**: Medical images contain sensitive information that must be protected
-2. **Data Sharing**: Enables secure sharing of medical datasets for research while maintaining privacy
-3. **Regulatory Compliance**: Helps meet requirements like HIPAA and GDPR
-4. **Model Robustness**: DP training can improve model generalization and robustness
+### Why Differential Privacy in Medical Imaging?
 
-The choice of gradient clipping method in DP-SGD significantly impacts both privacy guarantees and model performance. This project aims to provide empirical evidence of these trade-offs.
+Differential Privacy (DP) plays a crucial role in medical imaging for several compelling reasons:
 
-## Methodology
+1. **Patient Privacy Protection**
+   - Ensures sensitive medical data remains confidential
+   - Prevents reconstruction attacks on training data
+   - Maintains patient trust and confidentiality
 
-### Differential Privacy Implementation
-- Implemented using Opacus library
-- Privacy budget tracking with (ε, δ)-DP guarantees
-- Two gradient clipping approaches:
-  1. **Random Sparsification (RS)**: Randomly selects gradients to clip
-  2. **Automatic Clipping (AC)**: Dynamically adjusts clipping threshold
+2. **Regulatory Compliance**
+   - Helps meet HIPAA requirements in the US
+   - Ensures GDPR compliance in Europe
+   - Facilitates international data sharing
+
+3. **Research Benefits**
+   - Enables secure sharing of medical datasets
+   - Promotes collaborative research
+   - Supports reproducible science
+
+4. **Model Robustness**
+   - Improves model generalization
+   - Reduces overfitting to patient-specific features
+   - Enhances resistance to adversarial attacks
+
+## Technical Implementation
 
 ### Model Architecture
-- U-Net with ResNet34 encoder
-- Binary segmentation for pneumonia detection
-- Dice coefficient as the primary metric
 
-### Training Process
-- DP-SGD with both RS and AC
-- Privacy parameters:
-  - Noise multiplier: 1.0
-  - Max gradient norm: 1.0
-  - Target epsilon: 8.0
-  - Target delta: 1e-5
+Our implementation uses a specialized U-Net architecture with the following key features:
 
-## Results
+- **Encoder**: ResNet34 backbone (via `segmentation_models_pytorch`)
+- **Normalization**: GroupNorm layers (replacing BatchNorm for DP compatibility)
+- **Task**: Binary segmentation for pneumonia detection
+- **Metric**: Dice coefficient for segmentation quality assessment
 
-### Accuracy Comparison
-The following plot shows the validation Dice coefficient over training epochs for both methods:
+### Differential Privacy Implementation
 
-![Accuracy Comparison](outputs/comparison/accuracy_comparison.png)
+We leverage the Opacus library for PyTorch to implement DP-SGD with two distinct approaches:
 
-*Placeholder for accuracy comparison plot*
+#### 1. Random Sparsification (RS)
+- Randomly selects gradients for clipping
+- Reduces impact of outlier gradients
+- Generally provides stronger privacy guarantees
+- Computationally efficient
 
-### Privacy Loss Comparison
-The following plot shows the privacy loss (ε) over training epochs:
+#### 2. Automatic Clipping (AC)
+- Dynamically adjusts clipping thresholds
+- Adapts to gradient distribution changes
+- Often achieves better model performance
+- Requires additional computation for threshold adjustment
 
-![Privacy Loss](outputs/comparison/privacy_comparison.png)
+### Privacy Parameters
 
-*Placeholder for privacy loss plot*
+Our experiments use the following default privacy settings:
+```python
+{
+    'noise_multiplier': 1.0,
+    'max_grad_norm': 1.0,
+    'target_epsilon': 8.0,
+    'target_delta': 1e-5
+}
+```
 
-### Key Findings
-1. **Accuracy-Privacy Trade-off**:
-   - RS typically provides stronger privacy guarantees
-   - AC often achieves better model performance
-   - The trade-off varies with dataset size and model complexity
+## Results Analysis
 
-2. **Computational Efficiency**:
-   - RS is generally faster due to simpler gradient processing
-   - AC requires additional computation for threshold adjustment
+### Training Time Performance
+![Training Time per Epoch](outputs/collected_data/Iterations_Train_times_vs_Epochs_unet.png)
 
-3. **Practical Implications**:
-   - RS is preferred when privacy is the primary concern
-   - AC is better when model performance is critical
-   - Hybrid approaches might offer optimal balance
+This plot demonstrates the computational efficiency of each approach:
+- RS shows consistently faster training times
+- AC exhibits slightly higher overhead due to dynamic threshold computation
+- Non-DP baseline included for reference
+- Y-axis in log scale for better comparison
 
-## Usage
+### Training Loss Progression
+![Training Loss](outputs/collected_data/Training_Loss_vs_Epochs_unet.png)
 
-1. Install dependencies:
+The training loss plot reveals:
+- Initial convergence behavior
+- Impact of privacy mechanisms on learning
+- Stability of different approaches
+- Comparative learning efficiency
+
+### Validation Performance
+![Validation Loss](outputs/collected_data/Validation_Loss_vs_Epochs_unet.png)
+
+The validation loss provides insights into:
+- Generalization capabilities
+- Potential overfitting
+- Impact of privacy on model robustness
+- Comparative performance across approaches
+
+### Segmentation Quality
+![Validation Accuracy](outputs/collected_data/Validation_Accuracy_Vs_Epochs_unet.png)
+
+The Dice coefficient plot shows:
+- Overall segmentation quality
+- Performance stability
+- Impact of privacy on accuracy
+- Trade-offs between methods
+
+### Privacy Budget Analysis
+![Cumulative Privacy Budget](outputs/collected_data/Epsilon_vs_Epochs_unet.png)
+
+This critical visualization demonstrates:
+- Privacy budget consumption over time
+- Comparative privacy guarantees
+- Budget efficiency of each method
+- Privacy-utility trade-offs
+
+## Key Findings
+
+### Performance Analysis
+
+1. **Privacy-Utility Trade-off**
+   - RS provides stronger privacy guarantees
+   - AC achieves better early-epoch performance
+   - Trade-off varies with dataset characteristics
+
+2. **Computational Efficiency**
+   - RS demonstrates faster training times
+   - AC requires more computation but may converge faster
+   - Overall system overhead is manageable
+
+3. **Practical Implications**
+   - Choose RS for privacy-critical applications
+   - Prefer AC when model performance is paramount
+   - Consider hybrid approaches for balanced requirements
+
+## Getting Started
+
+1. **Installation**
 ```bash
 pip install -r requirements.txt
 ```
 
-2. Run the comparison experiment:
+2. **Run Experiments in src/**
+
+3. **Generate Visualizations**
 ```bash
-python test/run_dp_comparison.py
+python src/generate_plots.py
 ```
 
-3. View results in the `outputs` directory:
-   - `outputs/rs_training/`: Results for Random Sparsification
-   - `outputs/automatic_clipping/`: Results for Automatic Clipping
-   - `outputs/comparison/`: Comparison plots and metrics
+Results will be available in `outputs/collected_data/`.
 
-## Future Work
+## Future Directions
 
-1. **Hybrid Approaches**: Investigate combinations of RS and AC
-2. **Adaptive Parameters**: Develop methods to automatically tune privacy parameters
-3. **Multi-center Studies**: Extend to federated learning scenarios
-4. **Privacy Auditing**: Implement comprehensive privacy auditing tools
+1. **Methodology Improvements**
+   - Hybrid RS-AC approaches
+   - Adaptive privacy parameter tuning
+   - Enhanced privacy auditing tools
+
+2. **Application Extensions**
+   - Multi-center studies
+   - Federated learning integration
+   - Additional medical imaging tasks
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+We welcome contributions! Please submit pull requests for:
+- Bug fixes
+- Feature additions
+- Documentation improvements
+- Performance optimizations
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Acknowledgments
-
-- Opacus team for the DP-SGD implementation
-- PyTorch Lightning for the training framework
-- The medical imaging community for datasets and insights
+This project is licensed under the MIT License. See LICENSE file for details.
