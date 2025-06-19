@@ -162,3 +162,5 @@ cython_debug/
 # Ignore DICOM folders
 dicom-images-test/
 dicom-images-train/
+
+outputs/baseline/
