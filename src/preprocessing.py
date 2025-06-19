@@ -8,7 +8,7 @@ import scipy.io as sio
 import torch
 from tqdm import tqdm
 
-from octprocessing import get_unlabelled_bscans, get_valid_img_seg_reimpl
+from siim_processing import get_unlabelled_bscans, get_valid_img_seg_reimpl
 
 
 def plot_prediction(image, mask, prediction, file_name):
